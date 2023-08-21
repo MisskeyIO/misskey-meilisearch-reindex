@@ -85,11 +85,11 @@ rootCommand.SetHandler(async (
         var meiliSearchClient = new MeilisearchClient(meiliSearchHost, meiliSearchKey);
         var meiliSearchIndexClient = meiliSearchClient.Index(meiliSearchIndex);
 
-        string EncodeMillisecondsToAid(long milliseconds)
+        string EncodeDateTimeToAid(DateTime dateTime)
         {
             const long time2000 = 946684800000L;
             const string digits = "0123456789abcdefghijklmnopqrstuvwxyz";
-            var time = milliseconds - time2000;
+            var time = ((DateTimeOffset)dateTime).ToUnixTimeMilliseconds() - time2000;
             var encoded = string.Empty;
             do
             {
@@ -98,9 +98,6 @@ rootCommand.SetHandler(async (
 
             return encoded.PadLeft(8, '0') + "00";
         }
-
-        string EncodeDateTimeToAid(DateTime dateTime) =>
-            EncodeMillisecondsToAid(((DateTimeOffset)dateTime).ToUnixTimeMilliseconds());
 
         string GenerateQuerySince() =>
             indexSince.HasValue
@@ -212,7 +209,7 @@ rootCommand.SetHandler(async (
 
             fetchedNotes = documents.Count;
             totalFetchedNotes += fetchedNotes;
-            cursor = EncodeMillisecondsToAid(documents.LastOrDefault().CreatedAt);
+            cursor = documents.LastOrDefault().Id;
             var cursorDateTime = DateTimeOffset.FromUnixTimeMilliseconds(documents.LastOrDefault().CreatedAt).ToOffset(TimeSpan.FromHours(9));
             Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss}> Fetched {fetchedNotes:N0} notes from DB | {totalFetchedNotes:N0} / {totalNotes:N0} | cursor: {cursor} {cursorDateTime:yyyy-MM-dd HH:mm:ss}");
 
