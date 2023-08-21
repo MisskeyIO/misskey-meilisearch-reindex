@@ -85,11 +85,11 @@ rootCommand.SetHandler(async (
         var meiliSearchClient = new MeilisearchClient(meiliSearchHost, meiliSearchKey);
         var meiliSearchIndexClient = meiliSearchClient.Index(meiliSearchIndex);
 
-        string EncodeDateTimeToAid(DateTime dateTime)
+        string EncodeMillisecondsToAid(long milliseconds)
         {
             const long time2000 = 946684800000L;
             const string digits = "0123456789abcdefghijklmnopqrstuvwxyz";
-            var time = ((DateTimeOffset)dateTime).ToUnixTimeMilliseconds() - time2000;
+            var time = milliseconds - time2000;
             var encoded = string.Empty;
             do
             {
@@ -98,6 +98,9 @@ rootCommand.SetHandler(async (
 
             return encoded.PadLeft(8, '0') + "00";
         }
+
+        string EncodeDateTimeToAid(DateTime dateTime) =>
+            EncodeMillisecondsToAid(((DateTimeOffset)dateTime).ToUnixTimeMilliseconds());
 
         string GenerateQuerySince() =>
             indexSince.HasValue
@@ -164,22 +167,31 @@ rootCommand.SetHandler(async (
                   {GenerateQuerySince()} {GenerateQueryUntil()}
                   ("note"."visibility" = 'public' or "note"."visibility" = 'home') and
                   {GenerateQueryUserHost()}
-                  (("note"."renoteId" is not null and "note"."text" is not null) or ("note"."renoteId" is null and "note"."text" is not null))
+                  (("note"."renoteId" is not null and "note"."text" is not null) or ("note"."renoteId" is null and "note"."text" is not null)) and
+                  "note"."id" > @cursor
               order by "note"."id"
-              limit @limit offset @offset
+              limit @limit
             """;
 
         var taskElapsedRecords = new Queue<long>();
         var taskElapsedStopwatch = new Stopwatch();
 
-        int fetchedRows;
-        var offset = 0L;
+        var totalFetchedNotes = 0L;
+        var cursor = "0000000000";
+        int fetchedNotes;
         do
         {
+            if (totalNotesRefreshStopwatch.ElapsedMilliseconds > 3_600_000) // 1 hour
+            {
+                Console.WriteLine("Fetching total notes...");
+                totalNotes = await FetchTotalNotes(dbConnection);
+                totalNotesRefreshStopwatch.Restart();
+            }
+
             taskElapsedStopwatch.Restart();
             await using var cmd = new NpgsqlCommand(query, dbConnection);
             cmd.Parameters.AddWithValue("limit", batchSize);
-            cmd.Parameters.AddWithValue("offset", offset);
+            cmd.Parameters.AddWithValue("cursor", cursor);
             await using var reader = await cmd.ExecuteReaderAsync();
             var documents = new List<Note>();
             while (await reader.ReadAsync())
@@ -198,32 +210,27 @@ rootCommand.SetHandler(async (
                 documents.Add(note);
             }
 
-            offset += batchSize;
-            fetchedRows = documents.Count;
-            Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss}> Fetched {fetchedRows:N0} notes from DB | offset: {offset:N0} | cursor: {DateTimeOffset.FromUnixTimeMilliseconds(documents.LastOrDefault().CreatedAt).ToOffset(TimeSpan.FromHours(9)):yyyy-MM-dd HH:mm:ss}");
+            fetchedNotes = documents.Count;
+            totalFetchedNotes += fetchedNotes;
+            cursor = EncodeMillisecondsToAid(documents.LastOrDefault().CreatedAt);
+            var cursorDateTime = DateTimeOffset.FromUnixTimeMilliseconds(documents.LastOrDefault().CreatedAt).ToOffset(TimeSpan.FromHours(9));
+            Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss}> Fetched {fetchedNotes:N0} notes from DB | {totalFetchedNotes:N0} / {totalNotes:N0} | cursor: {cursor} {cursorDateTime:yyyy-MM-dd HH:mm:ss}");
 
             if (documents.Count == 0) break;
             var taskInfo = await meiliSearchIndexClient.AddDocumentsAsync(documents, "id");
-            Console.Write($"{DateTime.Now:yyyy-MM-dd HH:mm:ss}> Index {fetchedRows:N0} notes to MeiliSearch | TaskId: {taskInfo.TaskUid:N0} {taskInfo.Status}");
+            Console.Write($"{DateTime.Now:yyyy-MM-dd HH:mm:ss}> Index {fetchedNotes:N0} notes to MeiliSearch | TaskId: {taskInfo.TaskUid:N0} {taskInfo.Status}");
             taskElapsedStopwatch.Stop();
 
             taskElapsedRecords.Enqueue(taskElapsedStopwatch.ElapsedMilliseconds);
             if (taskElapsedRecords.Count > 10) taskElapsedRecords.Dequeue();
 
-            var estimatedRemainingTime =
-                TimeSpan.FromMilliseconds(taskElapsedRecords.Average() * (totalNotes - offset) / batchSize);
-            var progress = (double)offset / totalNotes * 100;
+            var estimatedRemainingTime = TimeSpan.FromMilliseconds(taskElapsedRecords.Average() * (totalNotes - totalFetchedNotes) / batchSize);
+            var progress = (double) totalFetchedNotes / totalNotes * 100;
 
             Console.WriteLine($" | Progress: {progress:F2}% | Estimated Remaining Time: {estimatedRemainingTime:hh\\:mm\\:ss}");
+        } while (fetchedNotes == batchSize);
 
-            if (totalNotesRefreshStopwatch.ElapsedMilliseconds <= 3_600_000) continue; // 1 hour
-
-            Console.WriteLine("Fetching total notes...");
-            totalNotes = await FetchTotalNotes(dbConnection);
-            totalNotesRefreshStopwatch.Restart();
-        } while (fetchedRows == batchSize);
-
-        Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss}> Finish indexing {offset - (batchSize - fetchedRows):N0} notes | elapsed: {startupStopwatch.Elapsed:hh\\:mm\\:ss}");
+        Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss}> Finish indexing {totalFetchedNotes:N0} notes | elapsed: {startupStopwatch.Elapsed:hh\\:mm\\:ss}");
     },
     databaseConnectionStringOption,
     meiliSearchHostOption,
