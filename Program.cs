@@ -1,5 +1,6 @@
 using System.CommandLine;
 using System.Data;
+using System.Diagnostics;
 using Meilisearch;
 using Misskey.Tools.MeiliSearch.Reindex;
 using Npgsql;
@@ -76,28 +77,85 @@ rootCommand.SetHandler(async (
         additionalHosts
     ) =>
     {
+        var startupStopwatch = Stopwatch.StartNew();
+
         await using var dbConnection = new NpgsqlConnection(databaseConnectionString);
         await dbConnection.OpenAsync();
 
         var meiliSearchClient = new MeilisearchClient(meiliSearchHost, meiliSearchKey);
         var meiliSearchIndexClient = meiliSearchClient.Index(meiliSearchIndex);
 
+        string EncodeDateTimeToAid(DateTime dateTime)
+        {
+            const long time2000 = 946684800000L;
+            const string digits = "0123456789abcdefghijklmnopqrstuvwxyz";
+            var time = ((DateTimeOffset)dateTime).ToUnixTimeMilliseconds() - time2000;
+            var encoded = string.Empty;
+            do
+            {
+                encoded = digits[(int)(time % digits.Length)] + encoded;
+            } while ((time /= digits.Length) != 0);
+
+            return encoded.PadLeft(8, '0') + "00";
+        }
+
         string GenerateQuerySince() =>
             indexSince.HasValue
-                ? """
-                  "note"."createdAt" >= @since and
+                ? $"""
+                    "note"."id" >= '{EncodeDateTimeToAid(indexSince.Value)}' and
                   """
                 : string.Empty;
 
         string GenerateQueryUntil() =>
             indexUntil.HasValue
-                ? """
-                  "note"."createdAt" <= @until and
+                ? $"""
+                    "note"."id" <= '{EncodeDateTimeToAid(indexUntil.Value)}' and
                   """
                 : string.Empty;
 
-        var query = additionalHosts.Length == 0
-            ? $"""
+        string GenerateQueryUserHost() =>
+            additionalHosts.Length == 0
+                ? """
+                  "note"."userHost" is null and
+                  """
+                : $"""
+                   ("note"."userHost" is null or "note"."userHost" in ('{string.Join("', '", additionalHosts)}')) and
+                  """;
+
+        Console.WriteLine("Fetching total notes...");
+
+        var countNotesQuery =
+            $"""
+              select
+                  count(*)
+              from
+                  "public"."note"
+              where
+                  {GenerateQuerySince()} {GenerateQueryUntil()}
+                  ("note"."visibility" = 'public' or "note"."visibility" = 'home') and
+                  {GenerateQueryUserHost()}
+                  (("note"."renoteId" is not null and "note"."text" is not null) or ("note"."renoteId" is null and "note"."text" is not null))
+            """;
+
+        async Task<long> FetchTotalNotes(NpgsqlConnection connection)
+        {
+            await using var countCommand = new NpgsqlCommand(countNotesQuery, connection);
+            return (long?)await countCommand.ExecuteScalarAsync() ?? 0L;
+        }
+
+        var totalNotes = await FetchTotalNotes(dbConnection);
+        var totalNotesRefreshStopwatch = Stopwatch.StartNew();
+
+        if (totalNotes == 0)
+        {
+            Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss}> No notes to index");
+            return;
+        }
+
+        Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss}> Start indexing {totalNotes:N0} notes");
+
+        var query =
+            $"""
               select
                   "id", "createdAt", "userId", "userHost", "channelId", "cw", "text", "tags"
               from
@@ -105,34 +163,21 @@ rootCommand.SetHandler(async (
               where
                   {GenerateQuerySince()} {GenerateQueryUntil()}
                   ("note"."visibility" = 'public' or "note"."visibility" = 'home') and
-                  "note"."userHost" is null and
+                  {GenerateQueryUserHost()}
                   (("note"."renoteId" is not null and "note"."text" is not null) or ("note"."renoteId" is null and "note"."text" is not null))
               order by "note"."id"
               limit @limit offset @offset
-              """
-            : $"""
-               select
-                   "id", "createdAt", "userId", "userHost", "channelId", "cw", "text", "tags"
-               from
-                   "public"."note"
-               where
-                   {GenerateQuerySince()} {GenerateQueryUntil()}
-                   ("note"."visibility" = 'public' or "note"."visibility" = 'home') and
-                   ("note"."userHost" is null or "note"."userHost" in ('{string.Join("', '", additionalHosts)}')) and
-                   (("note"."renoteId" is not null and "note"."text" is not null) or ("note"."renoteId" is null and "note"."text" is not null))
-               order by "note"."id"
-               limit @limit offset @offset
-               """;
+            """;
 
-        Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss}> Start indexing");
+        var taskElapsedRecords = new Queue<long>();
+        var taskElapsedStopwatch = new Stopwatch();
 
         int fetchedRows;
         var offset = 0L;
         do
         {
+            taskElapsedStopwatch.Restart();
             await using var cmd = new NpgsqlCommand(query, dbConnection);
-            if (indexSince.HasValue) cmd.Parameters.AddWithValue("since", indexSince.Value);
-            if (indexUntil.HasValue) cmd.Parameters.AddWithValue("until", indexUntil.Value);
             cmd.Parameters.AddWithValue("limit", batchSize);
             cmd.Parameters.AddWithValue("offset", offset);
             await using var reader = await cmd.ExecuteReaderAsync();
@@ -142,8 +187,7 @@ rootCommand.SetHandler(async (
                 var note = new Note
                 {
                     Id = reader.GetString("id"),
-                    CreatedAt = ((DateTimeOffset)reader.GetDateTime("createdAt").ToUniversalTime())
-                        .ToUnixTimeMilliseconds(),
+                    CreatedAt = ((DateTimeOffset)reader.GetDateTime("createdAt").ToUniversalTime()).ToUnixTimeMilliseconds(),
                     UserId = reader.GetString("userId"),
                     UserHost = reader.IsDBNull("userHost") ? null : reader.GetString("userHost"),
                     ChannelId = reader.IsDBNull("channelId") ? null : reader.GetString("channelId"),
@@ -156,14 +200,30 @@ rootCommand.SetHandler(async (
 
             offset += batchSize;
             fetchedRows = documents.Count;
-            Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss}> Fetched {fetchedRows} rows, offset: {offset}");
+            Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss}> Fetched {fetchedRows:N0} notes from DB | offset: {offset:N0} | cursor: {DateTimeOffset.FromUnixTimeMilliseconds(documents.LastOrDefault().CreatedAt).ToOffset(TimeSpan.FromHours(9)):yyyy-MM-dd HH:mm:ss}");
 
             if (documents.Count == 0) break;
             var taskInfo = await meiliSearchIndexClient.AddDocumentsAsync(documents, "id");
-            Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss}> TaskId: {taskInfo.TaskUid} {taskInfo.Status}");
+            Console.Write($"{DateTime.Now:yyyy-MM-dd HH:mm:ss}> Index {fetchedRows:N0} notes to MeiliSearch | TaskId: {taskInfo.TaskUid:N0} {taskInfo.Status}");
+            taskElapsedStopwatch.Stop();
+
+            taskElapsedRecords.Enqueue(taskElapsedStopwatch.ElapsedMilliseconds);
+            if (taskElapsedRecords.Count > 10) taskElapsedRecords.Dequeue();
+
+            var estimatedRemainingTime =
+                TimeSpan.FromMilliseconds(taskElapsedRecords.Average() * (totalNotes - offset) / batchSize);
+            var progress = (double)offset / totalNotes * 100;
+
+            Console.WriteLine($" | Progress: {progress:F2}% | Estimated Remaining Time: {estimatedRemainingTime:hh\\:mm\\:ss}");
+
+            if (totalNotesRefreshStopwatch.ElapsedMilliseconds <= 3_600_000) continue; // 1 hour
+
+            Console.WriteLine("Fetching total notes...");
+            totalNotes = await FetchTotalNotes(dbConnection);
+            totalNotesRefreshStopwatch.Restart();
         } while (fetchedRows == batchSize);
 
-        Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss}> Finish indexing");
+        Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss}> Finish indexing {offset - (batchSize - fetchedRows):N0} notes | elapsed: {startupStopwatch.Elapsed:hh\\:mm\\:ss}");
     },
     databaseConnectionStringOption,
     meiliSearchHostOption,
