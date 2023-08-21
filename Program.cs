@@ -82,19 +82,19 @@ rootCommand.SetHandler(async (
         var meiliSearchClient = new MeilisearchClient(meiliSearchHost, meiliSearchKey);
         var meiliSearchIndexClient = meiliSearchClient.Index(meiliSearchIndex);
 
-        string generateIndexSinceQuery() =>
+        string GenerateQuerySince() =>
             indexSince.HasValue
-                ? string.Empty
-                : """
+                ? """
                   "note"."createdAt" >= @since and
-                  """;
+                  """
+                : string.Empty;
 
-        string generateIndexUntilQuery() =>
+        string GenerateQueryUntil() =>
             indexUntil.HasValue
-                ? string.Empty
-                : """
+                ? """
                   "note"."createdAt" <= @until and
-                  """;
+                  """
+                : string.Empty;
 
         var query = additionalHosts.Length == 0
             ? $"""
@@ -103,7 +103,7 @@ rootCommand.SetHandler(async (
               from
                   "public"."note"
               where
-                  {generateIndexSinceQuery()} {generateIndexUntilQuery()}
+                  {GenerateQuerySince()} {GenerateQueryUntil()}
                   ("note"."visibility" = 'public' or "note"."visibility" = 'home') and
                   "note"."userHost" is null and
                   (("note"."renoteId" is not null and "note"."text" is not null) or ("note"."renoteId" is null and "note"."text" is not null))
@@ -116,7 +116,7 @@ rootCommand.SetHandler(async (
                from
                    "public"."note"
                where
-                   {generateIndexSinceQuery()} {generateIndexUntilQuery()}
+                   {GenerateQuerySince()} {GenerateQueryUntil()}
                    ("note"."visibility" = 'public' or "note"."visibility" = 'home') and
                    ("note"."userHost" is null or "note"."userHost" in ('{string.Join("', '", additionalHosts)}')) and
                    (("note"."renoteId" is not null and "note"."text" is not null) or ("note"."renoteId" is null and "note"."text" is not null))
