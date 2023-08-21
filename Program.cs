@@ -1,4 +1,4 @@
-﻿using System.CommandLine;
+using System.CommandLine;
 using System.Data;
 using Meilisearch;
 using Misskey.Tools.MeiliSearch.Reindex;
@@ -8,13 +8,13 @@ var databaseConnectionStringOption = new Option<string>(
     "--database",
     "Database Connection String, e.g. 'Server=localhost;Port=5432;Database=misskey;User Id=postgres;Password=postgres;'"
 ) { IsRequired = true };
-databaseConnectionStringOption.AddAlias("-c");
+databaseConnectionStringOption.AddAlias("-d");
 
 var meiliSearchHostOption = new Option<string>(
     "--meili",
     "MeiliSearch Host, e.g. 'http://localhost:7700'"
 ) { IsRequired = true };
-meiliSearchHostOption.AddAlias("-s");
+meiliSearchHostOption.AddAlias("-m");
 
 var meiliSearchKeyOption = new Option<string>(
     "--meili-key",
@@ -27,6 +27,18 @@ var meiliSearchIndexOption = new Option<string>(
     "MeiliSearch Index"
 ) { IsRequired = true };
 meiliSearchIndexOption.AddAlias("-i");
+
+var indexSinceOption = new Option<DateTime?>(
+    "--index-since",
+    "Index Since"
+) { IsRequired = false };
+indexSinceOption.AddAlias("-s");
+
+var indexUntilOption = new Option<DateTime?>(
+    "--index-until",
+    "Index Until"
+) { IsRequired = false };
+indexUntilOption.AddAlias("-u");
 
 var batchSizeOption = new Option<int>(
     "--batch-size",
@@ -47,6 +59,8 @@ var rootCommand = new RootCommand("Reindex Misskey Notes to MeiliSearch")
     meiliSearchHostOption,
     meiliSearchKeyOption,
     meiliSearchIndexOption,
+    indexSinceOption,
+    indexUntilOption,
     batchSizeOption,
     additionalHostsOption
 };
@@ -56,6 +70,8 @@ rootCommand.SetHandler(async (
         meiliSearchHost,
         meiliSearchKey,
         meiliSearchIndex,
+        indexSince,
+        indexUntil,
         batchSize,
         additionalHosts
     ) =>
@@ -66,13 +82,28 @@ rootCommand.SetHandler(async (
         var meiliSearchClient = new MeilisearchClient(meiliSearchHost, meiliSearchKey);
         var meiliSearchIndexClient = meiliSearchClient.Index(meiliSearchIndex);
 
+        string generateIndexSinceQuery() =>
+            indexSince.HasValue
+                ? string.Empty
+                : """
+                  "note"."createdAt" >= @since and
+                  """;
+
+        string generateIndexUntilQuery() =>
+            indexUntil.HasValue
+                ? string.Empty
+                : """
+                  "note"."createdAt" <= @until and
+                  """;
+
         var query = additionalHosts.Length == 0
-            ? """
+            ? $"""
               select
                   "id", "createdAt", "userId", "userHost", "channelId", "cw", "text", "tags"
               from
                   "public"."note"
               where
+                  {generateIndexSinceQuery()} {generateIndexUntilQuery()}
                   ("note"."visibility" = 'public' or "note"."visibility" = 'home') and
                   "note"."userHost" is null and
                   (("note"."renoteId" is not null and "note"."text" is not null) or ("note"."renoteId" is null and "note"."text" is not null))
@@ -85,6 +116,7 @@ rootCommand.SetHandler(async (
                from
                    "public"."note"
                where
+                   {generateIndexSinceQuery()} {generateIndexUntilQuery()}
                    ("note"."visibility" = 'public' or "note"."visibility" = 'home') and
                    ("note"."userHost" is null or "note"."userHost" in ('{string.Join("', '", additionalHosts)}')) and
                    (("note"."renoteId" is not null and "note"."text" is not null) or ("note"."renoteId" is null and "note"."text" is not null))
@@ -92,13 +124,15 @@ rootCommand.SetHandler(async (
                limit @limit offset @offset
                """;
 
-        Console.WriteLine("Start");
+        Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss}> Start indexing");
 
         int fetchedRows;
         var offset = 0L;
         do
         {
             await using var cmd = new NpgsqlCommand(query, dbConnection);
+            if (indexSince.HasValue) cmd.Parameters.AddWithValue("since", indexSince.Value);
+            if (indexUntil.HasValue) cmd.Parameters.AddWithValue("until", indexUntil.Value);
             cmd.Parameters.AddWithValue("limit", batchSize);
             cmd.Parameters.AddWithValue("offset", offset);
             await using var reader = await cmd.ExecuteReaderAsync();
@@ -122,19 +156,21 @@ rootCommand.SetHandler(async (
 
             offset += batchSize;
             fetchedRows = documents.Count;
-            Console.WriteLine($"Fetched {fetchedRows} rows, offset: {offset}");
+            Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss}> Fetched {fetchedRows} rows, offset: {offset}");
 
             if (documents.Count == 0) break;
             var taskInfo = await meiliSearchIndexClient.AddDocumentsAsync(documents, "id");
-            Console.WriteLine($"TaskId: {taskInfo.TaskUid} {taskInfo.Status}");
+            Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss}> TaskId: {taskInfo.TaskUid} {taskInfo.Status}");
         } while (fetchedRows == batchSize);
 
-        Console.WriteLine("Done");
+        Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss}> Finish indexing");
     },
     databaseConnectionStringOption,
     meiliSearchHostOption,
     meiliSearchKeyOption,
     meiliSearchIndexOption,
+    indexSinceOption,
+    indexUntilOption,
     batchSizeOption,
     additionalHostsOption
 );
