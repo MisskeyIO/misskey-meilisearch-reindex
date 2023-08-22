@@ -29,6 +29,12 @@ var meiliSearchIndexOption = new Option<string>(
 ) { IsRequired = true };
 meiliSearchIndexOption.AddAlias("-i");
 
+var meiliSearchIndexSettingsUpdateOption = new Option<bool>(
+    "--meili-index-settings-update",
+    "Update MeiliSearch Index Settings"
+) { IsRequired = false };
+meiliSearchIndexSettingsUpdateOption.AddAlias("-x");
+
 var indexSinceOption = new Option<DateTime?>(
     "--index-since",
     "Index Since"
@@ -44,7 +50,7 @@ indexUntilOption.AddAlias("-u");
 var batchSizeOption = new Option<int>(
     "--batch-size",
     description: "Batch Size",
-    getDefaultValue: () => 10000
+    getDefaultValue: () => 1000
 ) { IsRequired = false };
 batchSizeOption.AddAlias("-n");
 
@@ -60,23 +66,25 @@ var rootCommand = new RootCommand("Reindex Misskey Notes to MeiliSearch")
     meiliSearchHostOption,
     meiliSearchKeyOption,
     meiliSearchIndexOption,
+    meiliSearchIndexSettingsUpdateOption,
     indexSinceOption,
     indexUntilOption,
     batchSizeOption,
     additionalHostsOption
 };
 
-rootCommand.SetHandler(async (
-        databaseConnectionString,
-        meiliSearchHost,
-        meiliSearchKey,
-        meiliSearchIndex,
-        indexSince,
-        indexUntil,
-        batchSize,
-        additionalHosts
-    ) =>
+rootCommand.SetHandler(async context =>
     {
+        var databaseConnectionString = context.ParseResult.GetValueForOption(databaseConnectionStringOption)!;
+        var meiliSearchHost = context.ParseResult.GetValueForOption(meiliSearchHostOption)!;
+        var meiliSearchKey = context.ParseResult.GetValueForOption(meiliSearchKeyOption)!;
+        var meiliSearchIndex = context.ParseResult.GetValueForOption(meiliSearchIndexOption)!;
+        var meiliSearchIndexSettingsUpdate = context.ParseResult.GetValueForOption(meiliSearchIndexSettingsUpdateOption);
+        var indexSince = context.ParseResult.GetValueForOption(indexSinceOption);
+        var indexUntil = context.ParseResult.GetValueForOption(indexUntilOption);
+        var batchSize = context.ParseResult.GetValueForOption(batchSizeOption);
+        var additionalHosts = context.ParseResult.GetValueForOption(additionalHostsOption) ?? Array.Empty<string>();
+
         var startupStopwatch = Stopwatch.StartNew();
 
         await using var dbConnection = new NpgsqlConnection(databaseConnectionString);
@@ -84,6 +92,20 @@ rootCommand.SetHandler(async (
 
         var meiliSearchClient = new MeilisearchClient(meiliSearchHost, meiliSearchKey);
         var meiliSearchIndexClient = meiliSearchClient.Index(meiliSearchIndex);
+
+        if (meiliSearchIndexSettingsUpdate)
+        {
+            Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss}> Updating MeiliSearch Index Settings...");
+            var taskInfo = await meiliSearchIndexClient.UpdateSettingsAsync(new Settings
+            {
+                SearchableAttributes = new[] { "text", "cw" },
+                FilterableAttributes = new[] { "channelId", "createdAt", "tags", "userHost", "userId" },
+                SortableAttributes = new[] { "createdAt" },
+                TypoTolerance = new TypoTolerance { Enabled = false },
+                Pagination = new Pagination { MaxTotalHits = 10000 }
+            });
+            Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss}> Updated MeiliSearch Index Settings | TaskId: {taskInfo.TaskUid:N0} {taskInfo.Status}");
+        }
 
         string EncodeDateTimeToAid(DateTime dateTime)
         {
@@ -122,7 +144,7 @@ rootCommand.SetHandler(async (
                    ("note"."userHost" is null or "note"."userHost" in ('{string.Join("', '", additionalHosts)}')) and
                   """;
 
-        Console.WriteLine("Fetching total notes...");
+        Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss}> Fetching total notes...");
 
         var countNotesQuery =
             $"""
@@ -180,9 +202,10 @@ rootCommand.SetHandler(async (
         {
             if (totalNotesRefreshStopwatch.ElapsedMilliseconds > 3_600_000) // 1 hour
             {
-                Console.WriteLine("Fetching total notes...");
+                Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss}> Fetching total notes...");
                 totalNotes = await FetchTotalNotes(dbConnection);
                 totalNotesRefreshStopwatch.Restart();
+                Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss}> Updated total notes: {totalNotes:N0}");
             }
 
             taskElapsedStopwatch.Restart();
@@ -228,15 +251,7 @@ rootCommand.SetHandler(async (
         } while (fetchedNotes == batchSize);
 
         Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss}> Finish indexing {totalFetchedNotes:N0} notes | elapsed: {startupStopwatch.Elapsed:hh\\:mm\\:ss}");
-    },
-    databaseConnectionStringOption,
-    meiliSearchHostOption,
-    meiliSearchKeyOption,
-    meiliSearchIndexOption,
-    indexSinceOption,
-    indexUntilOption,
-    batchSizeOption,
-    additionalHostsOption
+    }
 );
 
 return await rootCommand.InvokeAsync(args);
