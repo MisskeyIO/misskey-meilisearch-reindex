@@ -45,6 +45,11 @@ var batchSizeOption = new Option<int>(
     "-n"
 ) { Description = "Batch Size", DefaultValueFactory = _ => 1000 };
 
+var delayMillisecondsOption = new Option<int>(
+    "--delay",
+    "-p"
+) { Description = "Delay milliseconds between indexing loop iterations", DefaultValueFactory = _ => 0 };
+
 var additionalHostsOption = new Option<string[]>(
     "--additional-hosts",
     "-a"
@@ -60,6 +65,7 @@ var rootCommand = new RootCommand("Reindex Misskey Notes to MeiliSearch")
     indexSinceOption,
     indexUntilOption,
     batchSizeOption,
+    delayMillisecondsOption,
     additionalHostsOption
 };
 
@@ -73,7 +79,13 @@ rootCommand.SetAction(async parseResult =>
         var indexSince = parseResult.GetValue(indexSinceOption);
         var indexUntil = parseResult.GetValue(indexUntilOption);
         var batchSize = parseResult.GetValue(batchSizeOption);
+        var delayMilliseconds = parseResult.GetValue(delayMillisecondsOption);
         var additionalHosts = parseResult.GetValue(additionalHostsOption) ?? Array.Empty<string>();
+
+        if (delayMilliseconds < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(delayMilliseconds), "Delay milliseconds must be greater than or equal to 0.");
+        }
 
         var startupStopwatch = Stopwatch.StartNew();
 
@@ -238,6 +250,11 @@ rootCommand.SetAction(async parseResult =>
             var progress = (double) totalFetchedNotes / totalNotes * 100;
 
             Console.WriteLine($" | Progress: {progress:F2}% | Estimated Remaining Time: {estimatedRemainingTime:hh\\:mm\\:ss}");
+
+            if (delayMilliseconds > 0 && fetchedNotes == batchSize)
+            {
+                await Task.Delay(delayMilliseconds);
+            }
         } while (fetchedNotes == batchSize);
 
         Console.WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss}> Finish indexing {totalFetchedNotes:N0} notes | elapsed: {startupStopwatch.Elapsed:hh\\:mm\\:ss}");
