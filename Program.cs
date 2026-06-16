@@ -7,58 +7,48 @@ using Npgsql;
 
 var databaseConnectionStringOption = new Option<string>(
     "--database",
-    "Database Connection String, e.g. 'Server=localhost;Port=5432;Database=misskey;User Id=postgres;Password=postgres;'"
-) { IsRequired = true };
-databaseConnectionStringOption.AddAlias("-d");
+    "-d"
+) { Description = "Database Connection String, e.g. 'Server=localhost;Port=5432;Database=misskey;User Id=postgres;Password=postgres;'", Required = true };
 
 var meiliSearchHostOption = new Option<string>(
     "--meili",
-    "MeiliSearch Host, e.g. 'http://localhost:7700'"
-) { IsRequired = true };
-meiliSearchHostOption.AddAlias("-m");
+    "-m"
+) { Description = "MeiliSearch Host, e.g. 'http://localhost:7700'", Required = true };
 
 var meiliSearchKeyOption = new Option<string>(
     "--meili-key",
-    "MeiliSearch API Key"
-) { IsRequired = true };
-meiliSearchKeyOption.AddAlias("-k");
+    "-k"
+) { Description = "MeiliSearch API Key", Required = true };
 
 var meiliSearchIndexOption = new Option<string>(
     "--meili-index",
-    "MeiliSearch Index"
-) { IsRequired = true };
-meiliSearchIndexOption.AddAlias("-i");
+    "-i"
+) { Description = "MeiliSearch Index", Required = true };
 
 var meiliSearchIndexSettingsUpdateOption = new Option<bool>(
     "--meili-index-settings-update",
-    "Update MeiliSearch Index Settings"
-) { IsRequired = false };
-meiliSearchIndexSettingsUpdateOption.AddAlias("-x");
+    "-x"
+) { Description = "Update MeiliSearch Index Settings" };
 
 var indexSinceOption = new Option<DateTime?>(
     "--index-since",
-    "Index Since"
-) { IsRequired = false };
-indexSinceOption.AddAlias("-s");
+    "-s"
+) { Description = "Index Since" };
 
 var indexUntilOption = new Option<DateTime?>(
     "--index-until",
-    "Index Until"
-) { IsRequired = false };
-indexUntilOption.AddAlias("-u");
+    "-u"
+) { Description = "Index Until" };
 
 var batchSizeOption = new Option<int>(
     "--batch-size",
-    description: "Batch Size",
-    getDefaultValue: () => 1000
-) { IsRequired = false };
-batchSizeOption.AddAlias("-n");
+    "-n"
+) { Description = "Batch Size", DefaultValueFactory = _ => 1000 };
 
 var additionalHostsOption = new Option<string[]>(
     "--additional-hosts",
-    "Additional Hosts"
-) { IsRequired = false, AllowMultipleArgumentsPerToken = true };
-additionalHostsOption.AddAlias("-a");
+    "-a"
+) { Description = "Additional Hosts", AllowMultipleArgumentsPerToken = true };
 
 var rootCommand = new RootCommand("Reindex Misskey Notes to MeiliSearch")
 {
@@ -73,17 +63,17 @@ var rootCommand = new RootCommand("Reindex Misskey Notes to MeiliSearch")
     additionalHostsOption
 };
 
-rootCommand.SetHandler(async context =>
+rootCommand.SetAction(async parseResult =>
     {
-        var databaseConnectionString = context.ParseResult.GetValueForOption(databaseConnectionStringOption)!;
-        var meiliSearchHost = context.ParseResult.GetValueForOption(meiliSearchHostOption)!;
-        var meiliSearchKey = context.ParseResult.GetValueForOption(meiliSearchKeyOption)!;
-        var meiliSearchIndex = context.ParseResult.GetValueForOption(meiliSearchIndexOption)!;
-        var meiliSearchIndexSettingsUpdate = context.ParseResult.GetValueForOption(meiliSearchIndexSettingsUpdateOption);
-        var indexSince = context.ParseResult.GetValueForOption(indexSinceOption);
-        var indexUntil = context.ParseResult.GetValueForOption(indexUntilOption);
-        var batchSize = context.ParseResult.GetValueForOption(batchSizeOption);
-        var additionalHosts = context.ParseResult.GetValueForOption(additionalHostsOption) ?? Array.Empty<string>();
+        var databaseConnectionString = parseResult.GetRequiredValue(databaseConnectionStringOption);
+        var meiliSearchHost = parseResult.GetRequiredValue(meiliSearchHostOption);
+        var meiliSearchKey = parseResult.GetRequiredValue(meiliSearchKeyOption);
+        var meiliSearchIndex = parseResult.GetRequiredValue(meiliSearchIndexOption);
+        var meiliSearchIndexSettingsUpdate = parseResult.GetValue(meiliSearchIndexSettingsUpdateOption);
+        var indexSince = parseResult.GetValue(indexSinceOption);
+        var indexUntil = parseResult.GetValue(indexUntilOption);
+        var batchSize = parseResult.GetValue(batchSizeOption);
+        var additionalHosts = parseResult.GetValue(additionalHostsOption) ?? Array.Empty<string>();
 
         var startupStopwatch = Stopwatch.StartNew();
 
@@ -254,4 +244,4 @@ rootCommand.SetHandler(async context =>
     }
 );
 
-return await rootCommand.InvokeAsync(args);
+return await rootCommand.Parse(args).InvokeAsync();
