@@ -1,0 +1,86 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - v*
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: Publish ${{ matrix.asset_name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: linux-x64
+            asset_name: misskey-meilisearch-reindex-linux-amd64
+            archive_name: misskey-meilisearch-reindex-linux-amd64.tar.gz
+          - rid: linux-arm64
+            asset_name: misskey-meilisearch-reindex-linux-arm64
+            archive_name: misskey-meilisearch-reindex-linux-arm64.tar.gz
+          - rid: win-x64
+            asset_name: misskey-meilisearch-reindex-windows-amd64
+            archive_name: misskey-meilisearch-reindex-windows-amd64.zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Publish
+        run: >-
+          dotnet publish misskey-meilisearch-reindex.csproj
+          --configuration Release
+          --runtime ${{ matrix.rid }}
+          --self-contained true
+          --output publish/${{ matrix.asset_name }}
+          /p:PublishSingleFile=true
+          /p:PublishTrimmed=false
+          /p:DebugType=None
+          /p:DebugSymbols=false
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          if [[ "${{ matrix.archive_name }}" == *.zip ]]; then
+            (cd publish && zip -r "../artifacts/${{ matrix.archive_name }}" "${{ matrix.asset_name }}")
+          else
+            tar -czf "artifacts/${{ matrix.archive_name }}" -C publish "${{ matrix.asset_name }}"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: artifacts/${{ matrix.archive_name }}
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: publish
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "${{ github.ref_name }}" release-assets/*
+          --title "${{ github.ref_name }}"
+          --notes "Release ${{ github.ref_name }}"
+          --verify-tag
